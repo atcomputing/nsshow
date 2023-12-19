@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+
+# -----------------------------------------------------------------
+# This program shows the non-default namespaces with the processes
+# connected to those namespaces. When using the -a flag, all
+# namespaces will be shown.
+#
+# Author: Gerlof Langeveld
+#         gerlof@atcomputing.nl
+#         AT Computing - Velp, The Netherlands
+#
+# Date:   Februar 2022
+# -----------------------------------------------------------------
+# This file is free software.  You can redistribute it and/or modify
+# it under the terms of the GNU General Public License (GPL); either
+# version 3, or (at your option) any later version.
+#
+import os
+import sys
+import glob
+import argparse
+
+from os.path import basename
+
+PRFORMAT = '%17s %-12s %7s %-40.40s'
+WARNING  = """Unprivileged user: taking default namespaces from
+current process and only show info about own processes!\n"""
+
+def main():
+    # verify command line arguments
+    myparser = argparse.ArgumentParser()
+    myparser.add_argument('-a', '--all', action='store_true')
+
+    args = myparser.parse_args()
+
+    # register the namespace inodes for process 1 as the default namespaces
+    # (requires root privileges); if not possible, give a warning
+    # and consider the namespace inodes for the current process as the
+    # default namespaces
+    #
+    nsdefault = {}
+
+    nspaths = glob.glob("/proc/1/ns/*")
+
+    if len(nspaths) == 0:
+        nspaths = glob.glob("/proc/self/ns/*")
+
+        print(WARNING)
+
+    for ns in nspaths:
+        target = os.readlink(ns)
+
+        nstype, nsinode = target.split(':')
+        nsinode = nsinode.strip('[]')
+
+        nsname = basename(ns)
+
+        nsdefault[nsname] = nsinode
+
+    # search namespaces of all other processes and register
+    # only the namespaces that deviate from the default namespaces
+    #
+    allnspaths = glob.glob('/proc/[0-9]*/ns/*')
+    nsspecific = {}	# specific namespaces
+    pidcmdline = {}	# process command line per pid
+
+    for ns in allnspaths:
+        # namespace looks similar to: mnt -> mnt:[4026531840]
+        # follow symlink to determine namespace inode number
+
+        try:	# this will fail for zombie processes
+            target = os.readlink(ns)
+
+            # split target (mnt:[4026531840]) into type and inode
+            nstype, nsinode = target.split(':')
+            nsinode = nsinode.strip('[]')
+
+            nsname = basename(ns)
+
+            if not args.all and nsdefault[nsname] == nsinode:
+                continue	# in case of default namespace
+        except Exception:
+            continue
+
+        # isolate pid of connected process from pathname
+        _, proc, pid, *rest = ns.split('/')
+
+        # register specific namespace type (if not known yet)
+        if nsname not in nsspecific:
+            nsspecific[nsname] = {}	# dict with namespace inodes
+
+        # register specific namespace inode (if not known yet)
+        if nsinode not in nsspecific[nsname]:
+            nsspecific[nsname][nsinode] = []	# list with pids
+
+        # register pid for namespace inode
+        nsspecific[nsname][nsinode].append(pid)
+
+        # determine name of process related to pid (if not known yet)
+        if pid not in pidcmdline:
+            pidcmdline[pid] = getcmd(pid)
+ 
+    # report every specific namespace with
+    # the processes that are connected to it
+    #
+    print(PRFORMAT % ("NSTYPE", "NSINODE", "PID", "COMMAND"))
+
+    for nsname in sorted(nsspecific):
+        for nsinode in nsspecific[nsname]:
+                for pid in nsspecific[nsname][nsinode]:
+                    print(PRFORMAT % (nsname, nsinode, pid, pidcmdline[pid]))
+        print()
+
+
+# return the command line related to the given pid
+#
+def getcmd(pid):
+    # open /proc/PID/cmdline
+    try:
+        t = open("/proc/%s/cmdline" % pid)
+    except Exception:
+        return "?"
+
+    cmd = t.readline().replace('\0', ' ').strip()
+    t.close()
+
+    if cmd:
+        return cmd
+
+    # for kernel processes, the cmdline is empty
+    # open /proc/PID/status file to get the name
+    try:
+        t = open("/proc/%s/status" % pid)
+    except Exception:
+        return "?"
+
+    for line in t:
+        label, cmd = line.split(maxsplit=2)
+
+        if label == "Name:":
+            break
+
+    t.close()
+
+    return '[' + cmd + ']'
+
+
+main()
